@@ -36,3 +36,12 @@ $$\text{Net Liquidity} = \text{Fed Total Assets (WALCL)} - \text{Treasury Genera
 * **Data Pipelines & Wrangling:** `pandas`, `yfinance`, `fredapi`
 * **Visualization:** `plotly` (Subplots, dual-y axis, custom time grids)
 * **API Integration:** FRED API (Federal Reserve Economic Data)
+
+---
+
+## 🚀 Quickstart & Setup
+
+1. **Clone the Repository:**
+   ```bash
+   git clone [https://github.com/YOUR-USERNAME/market-tide.git](https://github.com/YOUR-USERNAME/market-tide.git)
+   cd market-tide

@@ -1,0 +1,18 @@
+# Environment Variables & API Keys (NEVER push secrets!)
+.env
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python Cache & Bytecode
+__pycache__/
+*.pyc
+
+# OS System Files
+.DS_Store
+Thumbs.db
+
+# Test Files
+test.html
