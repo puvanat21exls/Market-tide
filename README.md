@@ -1,2 +1,38 @@
-# Market-tide
-An interactive macro-financial dashboard built in Python to track Federal Reserve balance sheet liquidity dynamics and analyze their impact on major asset classes (S&amp;P 500, Nasdaq, Bitcoin, Gold).
+# 🌊 Market Tide: Federal Reserve Net Liquidity & Asset Performance Dashboard
+
+An interactive macro-financial dashboard built in Python to track Federal Reserve balance sheet liquidity dynamics and analyze their impact on major asset classes (S&P 500, Nasdaq, Bitcoin, Gold).
+
+![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.58-red.svg)
+![Plotly](https://img.shields.io/badge/Plotly-6.8-FF6F00.svg)
+
+---
+
+## 📌 Executive Summary
+
+Central bank liquidity acts as the primary "water level" for asset prices. **Market Tide** quantifies real-time Federal Reserve liquidity injections and drains using economic data from FRED (Federal Reserve Economic Data) and historical market prices from Yahoo Finance.
+
+### **The Net Liquidity Equation**
+$$\text{Net Liquidity} = \text{Fed Total Assets (WALCL)} - \text{Treasury General Account (TGA)} - \text{Reverse Repo Facility (RRP)}$$
+
+- **WALCL (Fed Assets):** Total liquidity supplied.
+- **TGA (Treasury Drain):** Cash held by the US Treasury that is kept out of the banking system.
+- **RRP (Money Market Drain):** Capital parked at the Fed by institutional money funds.
+
+---
+
+## 🔑 Key Features & Analytics
+
+* **Interactive Liquidity Drivers:** Visualizes stacked balance sheet levels and net flow contributions (Monthly / Quarterly) to evaluate driver shifts (e.g., Quantitative Tightening vs. RRP drain).
+* **Credit Stress Monitor:** Real-time High-Yield Credit Spread ($BAMLH0A0HYM2$) gauge displaying percentile rankings relative to post-2008 historical distributions.
+* **Asset Race Benchmarking:** Indexed performance tracking (Rebased to 100) comparing Net Liquidity trends across SPY, QQQ, BTC, and Gold on linear and logarithmic scales.
+* **Macro Event Annotations:** Overlay of historical policy shocks (QE, QT, Repo Market Stress, Rate Hike Cycles).
+
+---
+
+## 🛠️ Tech Stack & API Dependencies
+
+* **Language & Frameworks:** Python, Streamlit
+* **Data Pipelines & Wrangling:** `pandas`, `yfinance`, `fredapi`
+* **Visualization:** `plotly` (Subplots, dual-y axis, custom time grids)
+* **API Integration:** FRED API (Federal Reserve Economic Data)
