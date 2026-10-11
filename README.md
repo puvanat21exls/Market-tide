@@ -41,7 +41,31 @@ $$\text{Net Liquidity} = \text{Fed Total Assets (WALCL)} - \text{Treasury Genera
 
 ## 🚀 Quickstart & Setup
 
-1. **Clone the Repository:**
+1. **Get a free FRED API key:** https://fred.stlouisfed.org/docs/api/api_key.html
+2. **Create the environment and install dependencies:**
    ```bash
-   git clone [https://github.com/YOUR-USERNAME/market-tide.git](https://github.com/YOUR-USERNAME/market-tide.git)
-   cd market-tide
+   python -m venv venv
+   venv\Scripts\activate        # Windows (Mac/Linux: source venv/bin/activate)
+   pip install -r requirements.txt
+   ```
+3. **Add your key** to a file named `.env` in this folder:
+   ```
+   FRED_API_KEY=your_key_here
+   ```
+4. **Run:**
+   ```bash
+   streamlit run app.py
+   ```
+
+## ☁️ Free Deployment (Streamlit Community Cloud)
+
+1. Push this folder to a GitHub repo (`.env` and `venv/` are git-ignored).
+2. At https://share.streamlit.io choose **New app**, select the repo, main file `app.py`.
+3. In **Settings > Secrets** add: `FRED_API_KEY = "your_key_here"` (see `.streamlit/secrets.toml.example`).
+
+## 🆕 Verdict & Lead/Lag sections
+
+- **Liquidity Verdict:** 13-week attribution of net liquidity change to Fed assets, TGA and RRP, with a simple regime label.
+- **Does Liquidity Lead Prices?:** lagged correlation between net-liquidity change and SPY/QQQ/BTC/GLD returns. Windows overlap, so treat it as context, not a signal.
+
+_Personal context tool, not financial advice._

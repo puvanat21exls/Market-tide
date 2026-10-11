@@ -1,0 +1,38 @@
+# Market-Tide Project Overview & File Summary
+
+This document summarizes the purpose and role of every file located within the `market-tide` folder.
+
+1. `app.py`
+   - **Role:** The core application script. This is the main Streamlit file that builds the interactive dashboard. It fetches financial data using `yfinance` and `fredapi`, processes it with `pandas`, and visualizes everything using `plotly`.
+
+2. `events.csv`
+   - **Role:** A dataset file containing major historical financial/economic events (like QE1, Repo Crisis, COVID/QE, Rate Hikes) along with their dates. The dashboard likely uses this to overlay event markers/vertical lines on the charts to visualize how these events correlate with market liquidity.
+
+3. `.env`
+   - **Role:** A hidden configuration file used to securely store your environment variables. In this project, it holds your `FRED_API_KEY` so it doesn't get hardcoded directly into the application scripts.
+
+4. `requirements.txt`
+   - **Role:** The Python dependencies list. It specifies all the external packages (like `streamlit`, `yfinance`, `plotly`, `fredapi`, `python-dotenv`) that need to be installed for the dashboard to run successfully.
+
+5. `sanity_check.py`
+   - **Role:** A small testing script. It was used to quickly verify that the `FRED_API_KEY` loads correctly from the `.env` file and that the connection to the Federal Reserve Economic Data API is working.
+
+6. `Command_note.txt`
+   - **Role:** A quick reference text file containing terminal commands (like activating the virtual environment and running `streamlit run app.py`) to easily launch the dashboard.
+
+7. `test.html`
+   - **Role:** An exported HTML file. This was likely generated during testing to check how the interactive Plotly charts render outside of the Streamlit app.
+
+8. `venv/` (Folder)
+   - **Role:** The Python virtual environment directory. This folder contains the isolated Python installation, scripts (like `pip` and `python`), and all the installed packages defined in `requirements.txt`. It keeps the project's dependencies separate from your global system environment.
+
+9. `__pycache__/` (Folder)
+   - **Role:** A standard Python system folder that stores compiled bytecode (e.g., `app.cpython-314.pyc`) to make your scripts load faster on subsequent runs.
+
+10. `start_dashboard.vbs`
+   - **Role:** Hidden launcher run at Windows login (via a shortcut in the Startup folder). Waits 15s, then starts the dashboard and opens the browser.
+
+11. `.streamlit/`
+   - **Role:** `config.toml` (dark theme, no telemetry) and `secrets.toml.example` (template for the FRED key when deployed).
+
+Note: `sanity_check.py`, `test.html` and `__pycache__/` listed above no longer exist.
