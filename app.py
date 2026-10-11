@@ -9,7 +9,13 @@ import os
 
 # --- Configuration & Caching ---
 load_dotenv()
+# Local: .env file. Streamlit Community Cloud: app secrets.
 FRED_API_KEY = os.getenv("FRED_API_KEY")
+if not FRED_API_KEY:
+    try:
+        FRED_API_KEY = st.secrets["FRED_API_KEY"]
+    except Exception:
+        FRED_API_KEY = None
 
 @st.cache_data(ttl=3600)
 def get_data(start_date):
@@ -80,7 +86,20 @@ show_btc = st.sidebar.checkbox("Bitcoin (BTC)", value=True)
 show_gld = st.sidebar.checkbox("Gold (GLD)", value=True)
 use_log = st.sidebar.checkbox("Use Logarithmic Scale", value=True)
 
-df, latest_dff, s_hy = get_data(start_date)
+if not FRED_API_KEY:
+    st.error("FRED_API_KEY not found. Add it to a local `.env` file (FRED_API_KEY=...) or to the app's Secrets when deployed. Free key: https://fred.stlouisfed.org/docs/api/api_key.html")
+    st.stop()
+
+try:
+    df, latest_dff, s_hy = get_data(start_date)
+except Exception as e:
+    st.error(f"Could not load data (check your internet connection and API key). Details: {e}")
+    st.info("Try refreshing the page in a moment.")
+    st.stop()
+
+if df['Net Liquidity (T)'].dropna().shape[0] < 5:
+    st.warning("Not enough data in this date range. Pick an earlier start date.")
+    st.stop()
 latest_hy = s_hy.iloc[-1]
 
 # Calculate valid latest liquidity dates before the Title
@@ -121,6 +140,51 @@ else:
 st.subheader(status_icon)
 st.write(f"**{status_title}**")
 st.write(f"The high-yield spread is currently **{latest_hy:.2f}%**, which is lower than **{higher_pct:.0f}%** of readings since {start_year}.")
+st.markdown("---")
+
+# --- Liquidity Verdict & Flow Attribution (what moved it lately) ---
+st.subheader("Liquidity Verdict")
+ATTR_WEEKS = 13
+if len(valid_liq) > ATTR_WEEKS:
+    recent = df.loc[valid_liq.index].iloc[-(ATTR_WEEKS + 1):]
+    d_fed = recent['WALCL'].iloc[-1] - recent['WALCL'].iloc[0]
+    d_tga = -(recent['WTREGEN'].iloc[-1] - recent['WTREGEN'].iloc[0])
+    d_rrp = -(recent['RRPONTSYD'].iloc[-1] - recent['RRPONTSYD'].iloc[0])
+    d_net = d_fed + d_tga + d_rrp  # $ billions
+
+    chg4 = (valid_liq.iloc[-1] - valid_liq.iloc[-5]) * 1000 if len(valid_liq) > 4 else 0
+    if d_net > 50 and chg4 > 0:
+        regime = "🟢 Expanding"
+    elif d_net < -50 and chg4 < 0:
+        regime = "🔴 Draining"
+    else:
+        regime = "🟡 Flat / Mixed"
+
+    parts = {"Fed balance sheet": d_fed, "Treasury (TGA)": d_tga, "Reverse repo (RRP)": d_rrp}
+    biggest = max(parts, key=lambda k: abs(parts[k]))
+    st.write(f"**{regime}** — net liquidity changed **{d_net:+,.0f}B** over the last {ATTR_WEEKS} weeks "
+             f"({chg4:+,.0f}B over the last 4). The biggest driver was **{biggest}** ({parts[biggest]:+,.0f}B).")
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric(f"Fed assets ({ATTR_WEEKS}w)", f"{d_fed:+,.0f}B")
+    a2.metric(f"TGA ({ATTR_WEEKS}w)", f"{d_tga:+,.0f}B")
+    a3.metric(f"RRP ({ATTR_WEEKS}w)", f"{d_rrp:+,.0f}B")
+    a4.metric(f"Net ({ATTR_WEEKS}w)", f"{d_net:+,.0f}B")
+
+    fig_attr = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["relative", "relative", "relative", "total"],
+        x=["Fed assets", "TGA", "RRP", "Net change"],
+        y=[d_fed, d_tga, d_rrp, d_net],
+        text=[f"{v:+,.0f}B" for v in (d_fed, d_tga, d_rrp, d_net)],
+        increasing=dict(marker=dict(color="#2ca02c")),
+        decreasing=dict(marker=dict(color="#d62728")),
+        totals=dict(marker=dict(color="#1f77b4")),
+    ))
+    fig_attr.update_layout(height=320, yaxis_title="Change ($ Billions)", showlegend=False, margin=dict(t=20))
+    st.plotly_chart(fig_attr, width='stretch')
+    st.caption(f"How the last {ATTR_WEEKS} weeks added up. Green = added liquidity, red = drained it. TGA and RRP are flipped: a rising TGA/RRP drains liquidity, so it shows as negative. "
+               "The regime label is a simple rule (net change beyond ±$50B and the last 4 weeks pointing the same way), not a forecast.")
 st.markdown("---")
 
 # --- Chart Formatting Helper ---
@@ -247,3 +311,30 @@ fig3.update_layout(yaxis_type="log" if use_log else "linear", hovermode="x unifi
 apply_time_gridlines(fig3)
 st.plotly_chart(fig3, width='stretch')
 st.caption("Each asset is indexed to 100 at its first available date in the selected range; assets that began later (e.g. Bitcoin) start their line later.")
+
+# --- Does liquidity lead prices? (flow vs returns, lagged correlation) ---
+st.markdown("---")
+st.subheader("Does Liquidity Lead Prices?")
+lc1, lc2 = st.columns([1, 1])
+lag_asset = lc1.selectbox("Asset:", [a for a in ['SPY', 'QQQ', 'BTC', 'GLD'] if a in df.columns])
+win = lc2.selectbox("Window (weeks):", [4, 13], index=0)
+
+liq_chg = df['Net Liquidity (T)'].pct_change(win)
+asset_ret = df[lag_asset].pct_change(win)
+lags = list(range(0, 13))
+corrs = [liq_chg.shift(l).corr(asset_ret) for l in lags]
+n_obs = pd.concat([liq_chg, asset_ret], axis=1).dropna().shape[0]
+
+if n_obs < 30:
+    st.info("Not enough overlapping history in this date range. Widen the start date (try 'All').")
+else:
+    best = max(range(len(corrs)), key=lambda i: abs(corrs[i]) if pd.notna(corrs[i]) else -1)
+    fig_lag = go.Figure(go.Bar(x=lags, y=corrs, marker_color=['#1f77b4' if i != best else '#ff7f0e' for i in range(len(lags))]))
+    fig_lag.update_layout(height=350, xaxis_title="Liquidity change measured N weeks BEFORE the asset move",
+                          yaxis_title="Correlation", yaxis_range=[-1, 1], showlegend=False)
+    fig_lag.add_hline(y=0, line_width=1, line_color="white", opacity=0.3)
+    st.plotly_chart(fig_lag, width='stretch')
+    st.write(f"Strongest link: liquidity change **{best} weeks earlier**, correlation **{corrs[best]:+.2f}** ({n_obs} weekly observations).")
+    st.caption(f"Each bar compares the {win}-week change in net liquidity (shifted back N weeks) with the {lag_asset} {win}-week return. "
+               "Bars far from zero at higher N suggest liquidity leads the asset. Caution: windows overlap, so effective sample size is much smaller than the count shown, "
+               "and correlations shift across eras. Treat this as context, not a trading signal.")
