@@ -144,32 +144,37 @@ st.markdown("---")
 
 # --- Liquidity Verdict & Flow Attribution (what moved it lately) ---
 st.subheader("Liquidity Verdict")
-ATTR_WEEKS = 13
-if len(valid_liq) > ATTR_WEEKS:
-    recent = df.loc[valid_liq.index].iloc[-(ATTR_WEEKS + 1):]
+
+def render_verdict(weeks, confirm_weeks, key):
+    """Attribute the last `weeks` of net-liquidity change to Fed / TGA / RRP."""
+    if len(valid_liq) <= weeks:
+        st.info("Not enough history in this date range for this view.")
+        return
+    recent = df.loc[valid_liq.index].iloc[-(weeks + 1):]
     d_fed = recent['WALCL'].iloc[-1] - recent['WALCL'].iloc[0]
     d_tga = -(recent['WTREGEN'].iloc[-1] - recent['WTREGEN'].iloc[0])
     d_rrp = -(recent['RRPONTSYD'].iloc[-1] - recent['RRPONTSYD'].iloc[0])
     d_net = d_fed + d_tga + d_rrp  # $ billions
 
-    chg4 = (valid_liq.iloc[-1] - valid_liq.iloc[-5]) * 1000 if len(valid_liq) > 4 else 0
-    if d_net > 50 and chg4 > 0:
+    threshold = 50 * weeks / 13  # scale the +/-$50B quarterly rule to the window
+    chg_confirm = (valid_liq.iloc[-1] - valid_liq.iloc[-(confirm_weeks + 1)]) * 1000
+    if d_net > threshold and chg_confirm > 0:
         regime = "🟢 Expanding"
-    elif d_net < -50 and chg4 < 0:
+    elif d_net < -threshold and chg_confirm < 0:
         regime = "🔴 Draining"
     else:
         regime = "🟡 Flat / Mixed"
 
     parts = {"Fed balance sheet": d_fed, "Treasury (TGA)": d_tga, "Reverse repo (RRP)": d_rrp}
     biggest = max(parts, key=lambda k: abs(parts[k]))
-    st.write(f"**{regime}** — net liquidity changed **{d_net:+,.0f}B** over the last {ATTR_WEEKS} weeks "
-             f"({chg4:+,.0f}B over the last 4). The biggest driver was **{biggest}** ({parts[biggest]:+,.0f}B).")
+    st.write(f"**{regime}** — net liquidity changed **{d_net:+,.0f}B** over the last {weeks} weeks "
+             f"({chg_confirm:+,.0f}B over the last {confirm_weeks}). The biggest driver was **{biggest}** ({parts[biggest]:+,.0f}B).")
 
     a1, a2, a3, a4 = st.columns(4)
-    a1.metric(f"Fed assets ({ATTR_WEEKS}w)", f"{d_fed:+,.0f}B")
-    a2.metric(f"TGA ({ATTR_WEEKS}w)", f"{d_tga:+,.0f}B")
-    a3.metric(f"RRP ({ATTR_WEEKS}w)", f"{d_rrp:+,.0f}B")
-    a4.metric(f"Net ({ATTR_WEEKS}w)", f"{d_net:+,.0f}B")
+    a1.metric(f"Fed assets ({weeks}w)", f"{d_fed:+,.0f}B")
+    a2.metric(f"TGA ({weeks}w)", f"{d_tga:+,.0f}B")
+    a3.metric(f"RRP ({weeks}w)", f"{d_rrp:+,.0f}B")
+    a4.metric(f"Net ({weeks}w)", f"{d_net:+,.0f}B")
 
     fig_attr = go.Figure(go.Waterfall(
         orientation="v",
@@ -182,9 +187,33 @@ if len(valid_liq) > ATTR_WEEKS:
         totals=dict(marker=dict(color="#1f77b4")),
     ))
     fig_attr.update_layout(height=320, yaxis_title="Change ($ Billions)", showlegend=False, margin=dict(t=20))
-    st.plotly_chart(fig_attr, width='stretch')
-    st.caption(f"How the last {ATTR_WEEKS} weeks added up. Green = added liquidity, red = drained it. TGA and RRP are flipped: a rising TGA/RRP drains liquidity, so it shows as negative. "
-               "The regime label is a simple rule (net change beyond ±$50B and the last 4 weeks pointing the same way), not a forecast.")
+    st.plotly_chart(fig_attr, width='stretch', key=f"attr_{key}")
+    st.caption(f"How the last {weeks} weeks added up. Green = added liquidity, red = drained it. TGA and RRP are flipped: a rising TGA/RRP drains liquidity, so it shows as negative. "
+               f"The regime label is a simple rule (net change beyond ±${threshold:,.0f}B and the last {confirm_weeks} weeks pointing the same way), not a forecast.")
+
+tab_month, tab_quarter = st.tabs(["Monthly (4 weeks)", "Quarterly (13 weeks)"])
+with tab_month:
+    render_verdict(4, 2, "month")
+    # Last 12 calendar months of net change, split by driver
+    liq_df = df.loc[valid_liq.index]
+    monthly = pd.DataFrame({
+        'Fed': liq_df['WALCL'].diff(),
+        'TGA': -liq_df['WTREGEN'].diff(),
+        'RRP': -liq_df['RRPONTSYD'].diff(),
+    }).resample('ME').sum().tail(12)
+    if len(monthly) >= 2:
+        monthly['Net'] = monthly['Fed'] + monthly['TGA'] + monthly['RRP']
+        fig_m = go.Figure()
+        for col, color in (('Fed', 'green'), ('TGA', 'red'), ('RRP', 'orange')):
+            fig_m.add_trace(go.Bar(x=monthly.index.strftime('%b %Y'), y=monthly[col], name=col, marker_color=color))
+        fig_m.add_trace(go.Scatter(x=monthly.index.strftime('%b %Y'), y=monthly['Net'], name="Net", mode='lines+markers',
+                                   line=dict(color='white', width=2)))
+        fig_m.update_layout(barmode='relative', height=320, yaxis_title="Change ($ Billions)", hovermode="x unified",
+                            legend=dict(orientation="h"), margin=dict(t=20))
+        st.plotly_chart(fig_m, width='stretch', key="monthly_hist")
+        st.caption("Last 12 calendar months. The first month may be partial if the start date cuts into it.")
+with tab_quarter:
+    render_verdict(13, 4, "quarter")
 st.markdown("---")
 
 # --- Chart Formatting Helper ---
