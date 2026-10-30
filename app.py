@@ -230,44 +230,95 @@ tab_over, tab_liq, tab_assets, tab_lead, tab_about = st.tabs(
 # ===================== OVERVIEW =====================
 with tab_over:
     st.subheader("Liquidity Verdict")
-    period = st.segmented_control("Window", ["Monthly (4 weeks)", "Quarterly (13 weeks)"],
-                                  default="Quarterly (13 weeks)", label_visibility="collapsed", key="verdict_period")
-    weeks, confirm = (4, 2) if period == "Monthly (4 weeks)" else (13, 4)
+    st.caption("Did the money in the financial system go up or down, and who moved it?")
+    WINDOWS = {"1M": (4, 2, "month"), "3M": (13, 4, "3 months"), "6M": (26, 8, "6 months"), "1Y": (52, 13, "year")}
+    period = st.segmented_control("Window", list(WINDOWS), default="3M",
+                                  label_visibility="collapsed", key="verdict_period") or "3M"
+    weeks, confirm, span_text = WINDOWS[period]
 
     if len(valid_liq) <= weeks:
-        st.info("Not enough history in this date range for this view.")
+        st.info("Not enough history in this date range for this view. Pick an earlier start date.")
     else:
         d_fed, d_tga, d_rrp, d_net = attribution(weeks)
         regime, r_color, threshold, chg_confirm = regime_for(weeks, confirm)
+
+        def lever_phrase(name, v):
+            v = round(v)
+            if abs(v) < 5:
+                return f"{name} barely moved"
+            return f"{name} {'added' if v > 0 else 'drained'} ${abs(v):,.0f}B"
+
+        if regime == "Flat / Mixed":
+            if abs(d_net) > threshold:
+                # Big move over the window, but the recent weeks disagree
+                regime = (f"Mixed: {'up' if d_net > 0 else 'down'} over the {span_text}, "
+                          f"{'falling' if chg_confirm < 0 else 'rising'} in the last {confirm} weeks")
+            else:
+                regime = f"Flat: smaller than the ±${threshold:,.0f}B that counts as a big move for this window"
         st.badge(regime, color=r_color)
-        st.write(f"Net liquidity changed **{d_net:+,.0f}B** over the last {weeks} weeks "
-                 f"({chg_confirm:+,.0f}B over the last {confirm}).")
+        net_word = "up" if round(d_net) > 0 else "down" if round(d_net) < 0 else "flat"
+        st.markdown(f'<div class="verdict-line">Net liquidity is <b>{net_word} ${abs(round(d_net)):,.0f}B</b> over the past {span_text}.</div>',
+                    unsafe_allow_html=True)
+        phrases = [lever_phrase("The Fed", d_fed), lever_phrase("the Treasury (TGA)", d_tga), lever_phrase("reverse repo (RRP)", d_rrp)]
+        st.write(" · ".join(phrases).replace("$", "\\$"))
 
-        left, right = st.columns([1, 1.4])
+        left, right = st.columns([1.25, 1])
         with left:
-            a1, a2 = st.columns(2)
-            a1.metric(f"Fed assets ({weeks}w)", fmt_b(d_fed), border=True)
-            a2.metric(f"TGA ({weeks}w)", fmt_b(d_tga), border=True)
-            a3, a4 = st.columns(2)
-            a3.metric(f"RRP ({weeks}w)", fmt_b(d_rrp), border=True)
-            a4.metric(f"Net ({weeks}w)", fmt_b(d_net), border=True)
-        with right:
-            fig_attr = go.Figure(go.Waterfall(
-                orientation="v",
-                measure=["relative", "relative", "relative", "total"],
-                x=["Fed assets", "TGA", "RRP", "Net change"],
-                y=[d_fed, d_tga, d_rrp, d_net],
-                text=[fmt_b(v) for v in (d_fed, d_tga, d_rrp, d_net)],
-                increasing=dict(marker=dict(color=C_FED)),
-                decreasing=dict(marker=dict(color=C_TGA)),
-                totals=dict(marker=dict(color=C_NET)),
-                connector=dict(line=dict(color="rgba(128,128,128,0.4)")),
-            ))
-            style_fig(fig_attr, 300)
-            fig_attr.update_layout(yaxis_title="$ Billions", showlegend=False)
-            st.plotly_chart(fig_attr, width='stretch', key=f"attr_{weeks}")
+            sw = '<span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:{};margin:0 6px -1px 14px"></span>'
+            st.markdown('<div style="font-size:0.85rem;color:rgba(250,250,250,0.75)">'
+                        + sw.format(C_FED) + 'Added money'
+                        + sw.format(C_TGA) + 'Drained money'
+                        + sw.format(C_NET) + 'Net result (all three combined)</div>',
+                        unsafe_allow_html=True)
+            # Tug-of-war: right = added money, left = drained money
+            names = ["Fed balance sheet", "Treasury account (TGA)", "Reverse repo (RRP)"]
+            vals = [d_fed, d_tga, d_rrp]
+            labels = [("added " if round(v) > 0 else "drained " if round(v) < 0 else "") + f"${abs(round(v)):,.0f}B" for v in vals]
+            span = max(abs(v) for v in vals + [d_net]) * 1.6 or 1
+            fig_tw = go.Figure()
+            biggest_abs = max(abs(v) for v in vals + [d_net]) or 1
+            positions = ['inside' if abs(v) >= 0.4 * biggest_abs else 'outside' for v in vals]
+            fig_tw.add_trace(go.Bar(
+                y=names, x=vals, orientation='h', text=labels, textposition=positions, cliponaxis=False,
+                insidetextanchor='middle', insidetextfont=dict(color='white', size=13),
+                marker=dict(color=[C_FED if v >= 0 else C_TGA for v in vals]),
+                hovertemplate="%{y}: %{x:+,.0f}B<extra></extra>"))
+            fig_tw.add_trace(go.Bar(
+                y=["Net result"], x=[d_net], orientation='h', text=[fmt_b(d_net)],
+                textposition='inside' if abs(d_net) >= 0.4 * biggest_abs else 'outside', cliponaxis=False,
+                insidetextanchor='middle', insidetextfont=dict(color='white', size=13),
+                marker=dict(color=C_NET), hovertemplate="Net result: %{x:+,.0f}B<extra></extra>"))
+            fig_tw.add_vline(x=0, line_width=2, line_color="rgba(200,200,200,0.6)")
+            fig_tw.add_annotation(x=-span, y=1.1, yref="paper", text="◀ drained", showarrow=False,
+                                  xanchor="left", font=dict(color=C_TGA, size=12))
+            fig_tw.add_annotation(x=span, y=1.1, yref="paper", text="added ▶", showarrow=False,
+                                  xanchor="right", font=dict(color=C_FED, size=12))
+            style_fig(fig_tw, 300)
+            fig_tw.update_layout(showlegend=False, hovermode="closest", bargap=0.35, margin=dict(l=10, r=10, t=40, b=10))
+            fig_tw.update_xaxes(range=[-span, span], showgrid=False, zeroline=False, showticklabels=False)
+            fig_tw.update_yaxes(categoryorder="array", categoryarray=["Net result"] + names[::-1], showgrid=False)
+            st.plotly_chart(fig_tw, width='stretch', key=f"tug_{weeks}", config={"displayModeBar": False})
 
-        if weeks == 4:
+        with right:
+            # Context: is this move big or normal? Shade the selected window on a longer trend.
+            look = min(len(valid_liq), max(52, weeks * 2))
+            trend = valid_liq.tail(look)
+            win_start = valid_liq.index[-(weeks + 1)]
+            fig_tr = go.Figure()
+            fig_tr.add_vrect(x0=win_start, x1=trend.index[-1], fillcolor=C_NET, opacity=0.15, line_width=0)
+            fig_tr.add_trace(go.Scatter(x=trend.index, y=trend, mode="lines", line=dict(color=C_NET, width=2.5),
+                                        hovertemplate="%{x|%b %d, %Y}: $%{y:.2f}T<extra></extra>"))
+            fig_tr.add_trace(go.Scatter(x=[win_start, trend.index[-1]], y=[valid_liq.loc[win_start], trend.iloc[-1]],
+                                        mode="markers", marker=dict(color="white", size=8, line=dict(color=C_NET, width=2)),
+                                        hoverinfo="skip"))
+            trend_label = "2 years" if look >= 104 else "year"
+            style_fig(fig_tr, 300)
+            fig_tr.update_layout(showlegend=False, hovermode="closest", yaxis_title="Net liquidity ($T)",
+                                 title=dict(text=f"Net liquidity over the last {trend_label} · shaded = selected window",
+                                            font=dict(size=12)))
+            st.plotly_chart(fig_tr, width='stretch', key=f"trend_{weeks}", config={"displayModeBar": False})
+
+        with st.expander("Month by month (last 12 months)"):
             monthly = pd.DataFrame({
                 'Fed': liq_df['WALCL'].diff(),
                 'TGA': -liq_df['WTREGEN'].diff(),
@@ -275,21 +326,24 @@ with tab_over:
             }).resample('ME').sum().tail(12)
             if len(monthly) >= 2:
                 monthly['Net'] = monthly['Fed'] + monthly['TGA'] + monthly['RRP']
-                labels = monthly.index.strftime('%b %y')
+                mlabels = monthly.index.strftime('%b %y')
                 fig_m = go.Figure()
                 for col, color in (('Fed', C_FED), ('TGA', C_TGA), ('RRP', C_RRP)):
-                    fig_m.add_trace(go.Bar(x=labels, y=monthly[col], name=col, marker_color=color))
-                fig_m.add_trace(go.Scatter(x=labels, y=monthly['Net'], name="Net", mode='lines+markers',
+                    fig_m.add_trace(go.Bar(x=mlabels, y=monthly[col], name=col, marker_color=color))
+                fig_m.add_trace(go.Scatter(x=mlabels, y=monthly['Net'], name="Net", mode='lines+markers',
                                            line=dict(color=C_NET, width=3)))
                 style_fig(fig_m, 300)
-                fig_m.update_layout(barmode='relative', yaxis_title="$ Billions", title=dict(text="Last 12 months", font=dict(size=14)))
+                fig_m.update_layout(barmode='relative', yaxis_title="$ Billions")
                 st.plotly_chart(fig_m, width='stretch', key="monthly_hist")
+                st.caption("Bars above zero added money that month, bars below drained it. The line is the net result. The first month may be partial.")
 
         with st.expander("How to read this"):
-            st.write(f"The waterfall splits the last {weeks} weeks of net-liquidity change into its three levers. "
-                     "Green adds liquidity, red drains it. TGA and RRP are flipped: when the Treasury's cash pile or reverse-repo "
-                     "balances rise, money leaves the banking system, so they show as negative. "
-                     f"The label is a simple rule (net change beyond ±${threshold:,.0f}B with the last {confirm} weeks pointing the same way), not a forecast.")
+            st.write("Net liquidity = Fed assets − Treasury account (TGA) − reverse repo (RRP). "
+                     "The Fed adds money when its balance sheet grows. The TGA and RRP drain money when they grow, because that cash is "
+                     "sitting at the Fed instead of circulating. Each bar shows how much that lever pushed liquidity up (right) or down (left) "
+                     f"over the past {span_text}; the blue bar is the total. "
+                     f"Badge rule: net change beyond ±${threshold:,.0f}B, with the last {confirm} weeks pointing the same way. "
+                     "Short windows can be swung by tax dates (mid-April, June, September, December), so check 6M or 1Y for the trend. Not a forecast.")
 
     st.divider()
     st.subheader("Net Liquidity vs S&P 500")
