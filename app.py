@@ -395,19 +395,92 @@ with tab_over:
 
 # ===================== LIQUIDITY =====================
 with tab_liq:
-    st.subheader("Liquidity Levers — Levels (the bathtub)")
-    fig_levels = go.Figure()
-    fig_levels.add_trace(go.Scatter(x=df.index, y=df['Net Liquidity (T)'], name="Net Liquidity", stackgroup='one', line=dict(color=C_NET)))
-    fig_levels.add_trace(go.Scatter(x=df.index, y=df['WTREGEN']/1000, name="TGA Drain", stackgroup='one', line=dict(color=C_TGA)))
-    fig_levels.add_trace(go.Scatter(x=df.index, y=df['RRPONTSYD']/1000, name="RRP Drain", stackgroup='one', line=dict(color=C_RRP)))
-    fig_levels.add_trace(go.Scatter(x=df.index, y=df['WALCL']/1000, name="Fed Assets (WALCL)", line=dict(color='#98FB98', width=3, dash='dot')))
-    style_fig(fig_levels, 480)
-    fig_levels.update_layout(yaxis_title="Trillions ($)")
-    apply_time_gridlines(fig_levels)
-    st.plotly_chart(fig_levels, width='stretch')
-    with st.expander("How to read this"):
-        st.write("The stacked total equals total Fed Assets (WALCL). The blue band is Net Liquidity — the money that actually reaches markets — "
-                 "and the red/orange bands are the TGA and RRP drains.")
+    st.subheader("Liquidity Levers — Where the Fed's Money Goes")
+    st.caption("The Fed's balance sheet is the total. Part of it reaches markets (net liquidity); the rest sits in two drains.")
+
+    # --- Idea 2: today's split in one bar ---
+    lv = liq_df.iloc[-1]
+    fed_t, tga_t, rrp_t = lv['WALCL'] / 1000, lv['WTREGEN'] / 1000, lv['RRPONTSYD'] / 1000
+    net_t = fed_t - tga_t - rrp_t
+    parts_split = [("Reaches markets (net liquidity)", net_t, C_NET),
+                   ("Treasury account (TGA)", tga_t, C_TGA),
+                   ("Reverse repo (RRP)", rrp_t, C_RRP)]
+
+    def amt_text(v_t):
+        """$ amount from trillions: '$5.75T', or '$4B' when under $1T."""
+        v_b = v_t * 1000
+        if round(v_b) >= 1000:
+            return f"${v_t:.2f}T"
+        return f"${v_b:.1f}B" if v_b < 10 else f"${v_b:,.0f}B"
+
+    def pct_text(v):
+        p = v / fed_t * 100
+        return f"{p:.0f}%" if p >= 1 else "<1%"
+
+    st.markdown(f'<div class="verdict-line">Of the Fed\'s <b>${fed_t:.2f}T</b>, <b>{pct_text(net_t)}</b> reaches markets.</div>',
+                unsafe_allow_html=True)
+    fig_split = go.Figure()
+    for label, v, color in parts_split:
+        share = v / fed_t * 100
+        fig_split.add_trace(go.Bar(
+            y=["Today"], x=[share], orientation='h', name=label, marker=dict(color=color),
+            text=[f"{label.split(' (')[0]}<br>{amt_text(v)} · {pct_text(v)}" if share >= 8 else ""],
+            textposition='inside', insidetextanchor='middle', insidetextfont=dict(color='white', size=13),
+            textangle=0, constraintext='inside',
+            hovertemplate=f"{label}: {amt_text(v)} ({share:.1f}%)<extra></extra>"))
+    style_fig(fig_split, 150)
+    fig_split.update_layout(barmode='stack', hovermode="closest", margin=dict(l=10, r=10, t=10, b=10),
+                            legend=dict(orientation="h", yanchor="top", y=-0.15, x=0, traceorder="normal"))
+    fig_split.update_xaxes(range=[0, 100], showticklabels=False, showgrid=False, zeroline=False)
+    fig_split.update_yaxes(showticklabels=False, showgrid=False)
+    st.plotly_chart(fig_split, width='stretch', key="lever_split", config={"displayModeBar": False})
+    st.write(" · ".join(f"{label}: {amt_text(v)} ({pct_text(v)})" for label, v, _ in parts_split).replace("$", "\\$"))
+    st.caption(f"Fed data as of {latest_liq_date.strftime('%b %d, %Y')}. Slices under 8% are labelled in the line above, not in the bar.")
+
+    # --- Idea 1: each lever on its own scale ---
+    st.markdown("#### Each lever on its own scale")
+    st.caption("Separate charts so small moves are visible. For the Fed, up = more money. For the TGA and RRP, up = more money drained.")
+    year_ago = liq_df.iloc[-53] if len(liq_df) > 52 else liq_df.iloc[0]
+    year_label = "1y" if len(liq_df) > 52 else "range"
+    levers = [
+        ("Fed assets", 'WALCL', C_FED, "up = adds money"),
+        ("Treasury account (TGA)", 'WTREGEN', C_TGA, "up = drains money"),
+        ("Reverse repo (RRP)", 'RRPONTSYD', C_RRP, "up = drains money"),
+    ]
+    cols = st.columns(3)
+    for col, (title, field, color, meaning) in zip(cols, levers):
+        series = liq_df[field]
+        now_v, then_v = series.iloc[-1], year_ago[field]
+        chg = now_v - then_v
+        value_text = amt_text(now_v / 1000)
+        chg_text = f"{chg / 1000:+.2f}T" if abs(chg) >= 1000 else f"{chg:+,.0f}B"
+        with col:
+            st.metric(title, value_text, f"{chg_text} ({year_label})", border=True,
+                      delta_color="normal" if field == 'WALCL' else "inverse", help=meaning.capitalize() + ".")
+            r_, g_, b_ = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+            fill = f"rgba({r_},{g_},{b_},0.2)"  # same color, 20% opacity
+            fig_l = go.Figure(go.Scatter(x=series.index, y=series / 1000, mode="lines", fill="tozeroy",
+                                         line=dict(color=color, width=2), fillcolor=fill,
+                                         hovertemplate="%{x|%b %d, %Y}: $%{y:.2f}T<extra></extra>"))
+            style_fig(fig_l, 220)
+            fig_l.update_layout(showlegend=False, hovermode="closest", margin=dict(l=10, r=10, t=10, b=10))
+            fig_l.update_yaxes(title_text="$T", rangemode="tozero")
+            fig_l.update_xaxes(nticks=6, showgrid=False)
+            st.plotly_chart(fig_l, width='stretch', key=f"lever_{field}", config={"displayModeBar": False})
+            st.caption(meaning.capitalize())
+
+    with st.expander("Classic stacked view (the bathtub)"):
+        fig_levels = go.Figure()
+        fig_levels.add_trace(go.Scatter(x=df.index, y=df['Net Liquidity (T)'], name="Net Liquidity", stackgroup='one', line=dict(color=C_NET)))
+        fig_levels.add_trace(go.Scatter(x=df.index, y=df['WTREGEN']/1000, name="TGA Drain", stackgroup='one', line=dict(color=C_TGA)))
+        fig_levels.add_trace(go.Scatter(x=df.index, y=df['RRPONTSYD']/1000, name="RRP Drain", stackgroup='one', line=dict(color=C_RRP)))
+        fig_levels.add_trace(go.Scatter(x=df.index, y=df['WALCL']/1000, name="Fed Assets (WALCL)", line=dict(color='#98FB98', width=3, dash='dot')))
+        style_fig(fig_levels, 420)
+        fig_levels.update_layout(yaxis_title="Trillions ($)")
+        apply_time_gridlines(fig_levels)
+        st.plotly_chart(fig_levels, width='stretch')
+        st.caption("The stacked total equals total Fed Assets (WALCL). The blue band is Net Liquidity — the money that actually reaches markets — "
+                   "and the red/orange bands are the TGA and RRP drains.")
 
     st.divider()
 
