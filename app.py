@@ -58,6 +58,19 @@ def get_data(start_date):
 
     return df, s_dff.iloc[-1], s_hy
 
+RATE_SERIES = {
+    'DGS3MO': '3-month', 'DGS2': '2-year', 'DGS10': '10-year',
+    'T10Y3M': '10Y − 3M', 'T10Y2Y': '10Y − 2Y', 'DFII10': '10Y real',
+}
+
+@st.cache_data(ttl=3600)
+def get_rates(start_date):
+    """Daily Treasury yields and curve spreads. Always reaches back at least ~13 months for the 1-year-ago curve."""
+    fred = Fred(api_key=FRED_API_KEY)
+    fetch_from = min(pd.Timestamp(start_date), pd.Timestamp.today() - pd.DateOffset(months=13))
+    rates = pd.DataFrame({code: fred.get_series(code, observation_start=fetch_from) for code in RATE_SERIES})
+    return rates.dropna(how='all')
+
 # --- Page setup & styling ---
 st.set_page_config(page_title="Market Tide", page_icon="🌊", layout="wide")
 
@@ -186,6 +199,24 @@ else:
 higher_pct = (s_hy > latest_hy).mean() * 100
 
 has_quarter = len(valid_liq) > 13
+
+try:
+    rates = get_rates(start_date)
+except Exception as e:
+    rates, rates_error = None, str(e)
+
+def curve_status(spread):
+    """Label the 10Y−3M spread: below 0 inverted, under 0.5 flat, else normal."""
+    if spread < 0:
+        return "Inverted", "red"
+    if spread < 0.5:
+        return "Flat", "orange"
+    return "Normal", "green"
+
+if rates is not None and rates['T10Y3M'].notna().any():
+    curve_label, curve_color = curve_status(rates['T10Y3M'].dropna().iloc[-1])
+else:
+    curve_label, curve_color = None, None
 q_regime, q_color, _, _ = regime_for(13, 4) if has_quarter else ("Not enough data", "gray", 0, 0)
 
 # --- Hero ---
@@ -196,6 +227,8 @@ with st.container(horizontal=True, gap="small"):
     st.badge(f"Liquidity (13w): {q_regime}", color=q_color)
     st.badge(f"Credit: {credit_label}", color=credit_color)
     st.badge(f"Fed funds: {latest_dff:.2f}%", color="violet")
+    if curve_label:
+        st.badge(f"Yield curve: {curve_label}", color=curve_color)
 
 if has_quarter:
     d_fed, d_tga, d_rrp, d_net = attribution(13)
@@ -204,28 +237,44 @@ if has_quarter:
     st.markdown(f'<div class="verdict-line">Net liquidity moved <b>{d_net:+,.0f}B</b> over the last 13 weeks, driven mostly by {biggest} ({parts[biggest]:+,.0f}B).</div>', unsafe_allow_html=True)
 
 # --- Status cards with sparklines ---
-spark_n = 26  # last ~6 months of weekly points
-m1, m2, m3, m4 = st.columns(4)
+SPARK_MONTHS = 24  # sparklines: one point per month, last 2 years
+
+def monthly_spark(series, how="mean"):
+    """Monthly points (average, or month-end value for prices/levels) over the last SPARK_MONTHS months."""
+    m = series.dropna().resample('ME')
+    m = m.last() if how == "last" else m.mean()
+    return m.dropna().tail(SPARK_MONTHS).round(3).tolist()
+
+spark_help = " Sparkline: monthly, last 2 years."
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Net Liquidity", f"${latest_liq:.2f}T", f"{delta_liq * 1000:+,.0f}B WoW", border=True,
-          chart_data=valid_liq.tail(spark_n).round(3).tolist(), chart_type="area",
-          help="Fed assets minus the Treasury General Account minus reverse repo. Sparkline: last 6 months.")
+          chart_data=monthly_spark(valid_liq, "last"), chart_type="area",
+          help="Fed assets minus the Treasury General Account minus reverse repo." + spark_help)
 m2.metric("Fed Funds Rate", f"{latest_dff:.2f}%", border=True,
-          chart_data=df['DFF'].dropna().tail(spark_n).round(3).tolist(),
-          help="Effective federal funds rate, weekly average.")
+          chart_data=monthly_spark(df['DFF']),
+          help="Effective federal funds rate: the overnight rate the Fed targets." + spark_help)
 hy_week_ago = s_hy.iloc[-6] if len(s_hy) > 5 else latest_hy
 m3.metric("High-Yield Spread", f"{latest_hy:.2f}%", f"{latest_hy - hy_week_ago:+.2f} pts (1w)", delta_color="inverse", border=True,
-          chart_data=s_hy.tail(spark_n * 5).round(3).tolist(),
-          help=f"Extra yield on junk bonds over Treasuries. Higher = more credit stress. Lower than {higher_pct:.0f}% of readings since {s_hy.index[0].year}.")
+          chart_data=monthly_spark(s_hy),
+          help=f"Extra yield on junk bonds over Treasuries. Higher = more credit stress. Lower than {higher_pct:.0f}% of readings since {s_hy.index[0].year}." + spark_help)
+if rates is not None and rates['DGS10'].notna().sum() > 5:
+    y10 = rates['DGS10'].dropna()
+    y10_week_ago = y10.iloc[-6]
+    m4.metric("10-Year Treasury", f"{y10.iloc[-1]:.2f}%", f"{y10.iloc[-1] - y10_week_ago:+.2f} pts (1w)", delta_color="off", border=True,
+              chart_data=monthly_spark(y10),
+              help="What the US government pays to borrow for 10 years. Sets mortgage and long-term borrowing costs; a key input for stock valuations. See the Rates tab." + spark_help)
+else:
+    m4.metric("10-Year Treasury", "—", border=True, help="Treasury yields could not be loaded.")
 if 'SPY' in df.columns and df['SPY'].dropna().shape[0] > 1:
     spy = df['SPY'].dropna()
-    m4.metric("S&P 500 (SPY)", f"${spy.iloc[-1]:,.2f}", f"{(spy.iloc[-1] / spy.iloc[-2] - 1) * 100:+.1f}% WoW", border=True,
-              chart_data=spy.tail(spark_n).round(2).tolist(), chart_type="area")
+    m5.metric("S&P 500 (SPY)", f"${spy.iloc[-1]:,.2f}", f"{(spy.iloc[-1] / spy.iloc[-2] - 1) * 100:+.1f}% WoW", border=True,
+              chart_data=monthly_spark(spy, "last"), chart_type="area", help="Month-end prices." + spark_help)
 
 st.write("")
 
 # --- Main sections ---
-tab_over, tab_liq, tab_assets, tab_lead, tab_about = st.tabs(
-    ["Overview", "Liquidity", "Assets", "Lead / Lag", "About"])
+tab_over, tab_liq, tab_rates, tab_assets, tab_lead, tab_about = st.tabs(
+    ["Overview", "Liquidity", "Rates", "Assets", "Lead / Lag", "About"])
 
 # ===================== OVERVIEW =====================
 with tab_over:
@@ -517,6 +566,95 @@ with tab_liq:
     st.plotly_chart(fig_flows, width='stretch')
     st.caption("Each bar shows how much that lever added (+) or drained (−) from Net Liquidity that period. TGA and RRP are inverted — when they rise, they drain, so their bars point down. The line is the net result. Big opposing bars = levers fighting each other (e.g. 2023: QT pulling down while the RRP drain pushed up).")
 
+# ===================== RATES =====================
+with tab_rates:
+    st.subheader("Treasury Yields & the Yield Curve")
+    st.caption("What the US government pays to borrow, from 3 months to 10 years. The gap between short and long rates is the yield curve.")
+    if rates is None:
+        st.error(f"Could not load Treasury yields. Details: {rates_error}")
+    else:
+        r = rates.ffill()
+        last = r.iloc[-1]
+        ago_idx = r.index.searchsorted(r.index[-1] - pd.DateOffset(years=1))
+        year_ago = r.iloc[min(ago_idx, len(r) - 1)]
+
+        # --- Cards ---
+        k1, k2, k3, k4 = st.columns(4)
+        for col, code, tip in (
+            (k1, 'DGS3MO', "Tracks the Fed's policy rate almost exactly: the 'cash' rate."),
+            (k2, 'DGS2', "What markets expect the Fed to do over the next 2 years. Moves first when cuts or hikes get priced in."),
+            (k3, 'DGS10', "Sets mortgage and long-term borrowing costs; a key input for stock valuations."),
+        ):
+            col.metric(f"{RATE_SERIES[code]} yield", f"{last[code]:.2f}%", f"{last[code] - year_ago[code]:+.2f} pts (1y)",
+                       delta_color="off", border=True, chart_data=monthly_spark(r[code]), help=tip + spark_help)
+        k4.metric("Curve: 10Y − 3M", f"{last['T10Y3M']:+.2f} pts", curve_label, delta_color="off", border=True,
+                  chart_data=monthly_spark(r['T10Y3M']),
+                  help="10-year yield minus 3-month yield. Below zero = inverted, which has come before most US recessions.")
+
+        st.badge(f"Yield curve: {curve_label}", color=curve_color)
+        curve_text = {
+            "Inverted": "Short-term rates are above long-term rates. Markets expect rates to fall, often because they expect the economy to slow.",
+            "Flat": "Short- and long-term rates are close together. A transition zone: the curve is either un-inverting or flattening.",
+            "Normal": "Long-term rates are above short-term rates, the usual shape when growth is expected to continue.",
+        }[curve_label]
+        st.write(curve_text)
+
+        # --- 1. Yield curve snapshot: today vs a year ago ---
+        st.markdown("#### The curve today vs a year ago")
+        maturities = ['DGS3MO', 'DGS2', 'DGS10']
+        mat_labels = ['3 months', '2 years', '10 years']
+        fig_curve = go.Figure()
+        fig_curve.add_trace(go.Scatter(x=mat_labels, y=[year_ago[m] for m in maturities], name=f"A year ago ({r.index[min(ago_idx, len(r) - 1)]:%b %Y})",
+                                       mode="lines+markers", line=dict(color="rgba(200,200,200,0.6)", width=2, dash="dot"), marker=dict(size=9)))
+        fig_curve.add_trace(go.Scatter(x=mat_labels, y=[last[m] for m in maturities], name=f"Today ({r.index[-1]:%b %d, %Y})",
+                                       mode="lines+markers+text", line=dict(color=C_NET, width=3), marker=dict(size=11),
+                                       text=[f"{last[m]:.2f}%" for m in maturities], textposition="top center"))
+        style_fig(fig_curve, 320)
+        curve_vals = [year_ago[m] for m in maturities] + [last[m] for m in maturities]
+        fig_curve.update_layout(yaxis_title="Yield (%)", hovermode="x unified")
+        fig_curve.update_yaxes(range=[min(curve_vals) - 0.3, max(curve_vals) + 0.35])
+        st.plotly_chart(fig_curve, width='stretch', key="curve_snapshot", config={"displayModeBar": False})
+        st.caption("Upward slope = normal. Downward slope = inverted. Comparing the two lines shows how the shape has changed.")
+
+        # --- 2. History ---
+        st.markdown("#### Yields over time")
+        show_real = st.toggle("Add the 10-year real yield (after expected inflation)", value=False,
+                              help="Often the best single rate for explaining gold and Bitcoin, which pay no interest.")
+        hist = r[r.index >= start_date]
+        fig_y = go.Figure()
+        for code, color in (('DGS3MO', '#4fc3f7'), ('DGS2', C_RRP), ('DGS10', '#f0f0f0')):
+            fig_y.add_trace(go.Scatter(x=hist.index, y=hist[code], name=RATE_SERIES[code], line=dict(color=color, width=1.8)))
+        fig_y.add_trace(go.Scatter(x=df.index, y=df['DFF'].ffill(), name="Fed funds", line=dict(color=C_RATE, width=1.5, dash="dot")))
+        if show_real:
+            fig_y.add_trace(go.Scatter(x=hist.index, y=hist['DFII10'], name="10Y real", line=dict(color="#d4af37", width=1.8)))
+        style_fig(fig_y, 420)
+        fig_y.update_layout(yaxis_title="Yield (%)")
+        apply_time_gridlines(fig_y)
+        st.plotly_chart(fig_y, width='stretch', key="yields_history", config={"displayModeBar": False})
+
+        # --- 3. Spreads with the inverted zone shaded ---
+        st.markdown("#### Is the curve inverted?")
+        fig_s = go.Figure()
+        low = min(hist['T10Y3M'].min(), hist['T10Y2Y'].min(), -0.5)
+        fig_s.add_hrect(y0=low * 1.1, y1=0, fillcolor=C_TGA, opacity=0.12, line_width=0)
+        fig_s.add_annotation(x=0.01, y=low * 0.55, xref="paper", text="Inverted zone", showarrow=False,
+                             xanchor="left", font=dict(color=C_TGA, size=12))
+        fig_s.add_trace(go.Scatter(x=hist.index, y=hist['T10Y3M'], name="10Y − 3M", line=dict(color=C_NET, width=2)))
+        fig_s.add_trace(go.Scatter(x=hist.index, y=hist['T10Y2Y'], name="10Y − 2Y", line=dict(color=C_RRP, width=1.6)))
+        fig_s.add_hline(y=0, line_width=1, line_color="rgba(200,200,200,0.6)")
+        style_fig(fig_s, 360)
+        fig_s.update_layout(yaxis_title="Spread (percentage points)")
+        apply_time_gridlines(fig_s)
+        st.plotly_chart(fig_s, width='stretch', key="spreads_history", config={"displayModeBar": False})
+
+        with st.expander("How to read this"):
+            st.write("A Treasury yield is the interest rate the US government pays to borrow for that length of time. "
+                     "Normally longer loans pay more, so the curve slopes up. When short rates rise above long rates, the curve is "
+                     "'inverted': markets expect the Fed to cut later, often because they expect a slowdown. The 10Y − 3M inversion has "
+                     "come before most US recessions, but the timing varies a lot (often 6–18 months) and it has given false alarms. "
+                     "Link to liquidity: when 3-month T-bills pay more than the Fed's reverse repo rate, money-market funds move cash out "
+                     "of RRP into T-bills, which is a big part of why RRP drained from over $2T to near zero. Context, not a forecast.")
+
 # ===================== ASSETS =====================
 with tab_assets:
     st.subheader("Asset Race (Indexed Performance)")
@@ -602,6 +740,8 @@ and how it relates to asset prices.
         {"Series": "Reverse repo (RRPONTSYD)", "Source": "FRED", "Latest": latest_liq_date.strftime('%Y-%m-%d'), "Updates": "Daily, averaged weekly"},
         {"Series": "Fed funds (DFF)", "Source": "FRED", "Latest": df['DFF'].dropna().index[-1].strftime('%Y-%m-%d'), "Updates": "Daily, averaged weekly"},
         {"Series": "High-yield spread", "Source": "FRED (ICE BofA)", "Latest": s_hy.index[-1].strftime('%Y-%m-%d'), "Updates": "Daily"},
+        {"Series": "Treasury yields & spreads (DGS3MO, DGS2, DGS10, T10Y3M, T10Y2Y, DFII10)", "Source": "FRED",
+         "Latest": rates.dropna(how='all').index[-1].strftime('%Y-%m-%d') if rates is not None else "unavailable", "Updates": "Daily (business days)"},
         {"Series": "SPY / QQQ / BTC / GLD", "Source": "Yahoo Finance", "Latest": df[available].dropna(how='all').index[-1].strftime('%Y-%m-%d') if available else "—", "Updates": "Daily, weekly close shown"},
     ])
     st.dataframe(fresh, hide_index=True, width='stretch')
