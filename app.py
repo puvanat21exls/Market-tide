@@ -142,6 +142,30 @@ start_date = st.sidebar.date_input("Start Date", value=start_date_val, key="star
 start_date = pd.to_datetime(start_date)
 st.sidebar.caption("Applies to every chart. The credit-stress gauge always uses history since 2008.")
 
+st.sidebar.markdown("---")
+st.sidebar.header("Chart Detail")
+chart_freq = st.sidebar.segmented_control("Chart detail", ["Weekly", "Monthly"], default="Monthly",
+                                          label_visibility="collapsed", key="chart_freq") or "Monthly"
+st.sidebar.caption("Monthly smooths out week-to-week noise on the long-history charts. "
+                   "Liquidity Flows and the Liquidity Verdict keep their own settings.")
+
+def clip_future(obj):
+    """Weekly bins are stamped with the Wednesday that ends the week, so the current week can carry a future date.
+    Cap those dates at today so monthly views put this week's prices in the right month."""
+    today = pd.Timestamp.today().normalize()
+    obj = obj.copy()
+    obj.index = obj.index.where(obj.index <= today, today)
+    return obj
+
+def to_freq(obj, how="last"):
+    """Resample to the chosen chart detail: month-end (or Wednesday) value for levels/prices, average for rates."""
+    if chart_freq == "Monthly":
+        obj = clip_future(obj)
+    grouped = obj.resample('ME' if chart_freq == "Monthly" else 'W-WED')
+    return (grouped.last() if how == "last" else grouped.mean()).dropna(how='all')
+
+HOVER_DATE = "%b %Y" if chart_freq == "Monthly" else "%b %d, %Y"
+
 # --- Load data ---
 if not FRED_API_KEY:
     st.error("FRED_API_KEY not found. Add it to a local `.env` file (FRED_API_KEY=...) or to the app's Secrets when deployed. Free key: https://fred.stlouisfed.org/docs/api/api_key.html")
@@ -241,34 +265,63 @@ SPARK_MONTHS = 24  # sparklines: one point per month, last 2 years
 
 def monthly_spark(series, how="mean"):
     """Monthly points (average, or month-end value for prices/levels) over the last SPARK_MONTHS months."""
-    m = series.dropna().resample('ME')
+    m = clip_future(series.dropna()).resample('ME')
     m = m.last() if how == "last" else m.mean()
     return m.dropna().tail(SPARK_MONTHS).round(3).tolist()
 
 spark_help = " Sparkline: monthly, last 2 years."
+
+def mini_chart(series, how, color, fmt, key, area=False):
+    """Small monthly chart with a light month axis (start, middle, end) for the header cards."""
+    m = clip_future(series.dropna()).resample('ME')
+    m = (m.last() if how == "last" else m.mean()).dropna().tail(SPARK_MONTHS)
+    if len(m) < 2:
+        return
+    pad = (m.max() - m.min()) * 0.15 or abs(m.iloc[-1]) * 0.02 or 1
+    r_, g_, b_ = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    fig = go.Figure(go.Scatter(
+        x=m.index, y=m.values, mode="lines", line=dict(color=color, width=2),
+        fill="tozeroy" if area else None, fillcolor=f"rgba({r_},{g_},{b_},0.18)",
+        hovertemplate="%{x|%b %Y}: " + fmt + "<extra></extra>"))
+    fig.update_layout(height=105, margin=dict(l=22, r=22, t=4, b=4), showlegend=False,
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      font=dict(family="Inter, sans-serif"), hovermode="closest")
+    fig.update_xaxes(tickvals=[m.index[0], m.index[len(m) // 2], m.index[-1]], tickformat="%b '%y",
+                     tickfont=dict(size=10, color="rgba(250,250,250,0.55)"), showgrid=False, zeroline=False,
+                     showline=True, linecolor="rgba(250,250,250,0.15)", ticks="outside", ticklen=3,
+                     tickcolor="rgba(250,250,250,0.25)",
+                     range=[m.index[0] - pd.Timedelta(days=12), m.index[-1] + pd.Timedelta(days=12)])  # room for edge labels
+    fig.update_yaxes(visible=False, range=[m.min() - pad, m.max() + pad])
+    st.plotly_chart(fig, width='stretch', key=key, config={"displayModeBar": False})
+
 m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Net Liquidity", f"${latest_liq:.2f}T", f"{delta_liq * 1000:+,.0f}B WoW", border=True,
-          chart_data=monthly_spark(valid_liq, "last"), chart_type="area",
-          help="Fed assets minus the Treasury General Account minus reverse repo." + spark_help)
-m2.metric("Fed Funds Rate", f"{latest_dff:.2f}%", border=True,
-          chart_data=monthly_spark(df['DFF']),
-          help="Effective federal funds rate: the overnight rate the Fed targets." + spark_help)
+with m1.container(border=True):
+    st.metric("Net Liquidity", f"${latest_liq:.2f}T", f"{delta_liq * 1000:+,.0f}B WoW",
+              help="Fed assets minus the Treasury General Account minus reverse repo." + spark_help)
+    mini_chart(valid_liq, "last", C_NET, "$%{y:.2f}T", "mini_liq", area=True)
+with m2.container(border=True):
+    st.metric("Fed Funds Rate", f"{latest_dff:.2f}%",
+              help="Effective federal funds rate: the overnight rate the Fed targets." + spark_help)
+    mini_chart(df['DFF'], "mean", C_RATE, "%{y:.2f}%", "mini_dff")
 hy_week_ago = s_hy.iloc[-6] if len(s_hy) > 5 else latest_hy
-m3.metric("High-Yield Spread", f"{latest_hy:.2f}%", f"{latest_hy - hy_week_ago:+.2f} pts (1w)", delta_color="inverse", border=True,
-          chart_data=monthly_spark(s_hy),
-          help=f"Extra yield on junk bonds over Treasuries. Higher = more credit stress. Lower than {higher_pct:.0f}% of readings since {s_hy.index[0].year}." + spark_help)
-if rates is not None and rates['DGS10'].notna().sum() > 5:
-    y10 = rates['DGS10'].dropna()
-    y10_week_ago = y10.iloc[-6]
-    m4.metric("10-Year Treasury", f"{y10.iloc[-1]:.2f}%", f"{y10.iloc[-1] - y10_week_ago:+.2f} pts (1w)", delta_color="off", border=True,
-              chart_data=monthly_spark(y10),
-              help="What the US government pays to borrow for 10 years. Sets mortgage and long-term borrowing costs; a key input for stock valuations. See the Rates tab." + spark_help)
-else:
-    m4.metric("10-Year Treasury", "—", border=True, help="Treasury yields could not be loaded.")
-if 'SPY' in df.columns and df['SPY'].dropna().shape[0] > 1:
-    spy = df['SPY'].dropna()
-    m5.metric("S&P 500 (SPY)", f"${spy.iloc[-1]:,.2f}", f"{(spy.iloc[-1] / spy.iloc[-2] - 1) * 100:+.1f}% WoW", border=True,
-              chart_data=monthly_spark(spy, "last"), chart_type="area", help="Month-end prices." + spark_help)
+with m3.container(border=True):
+    st.metric("High-Yield Spread", f"{latest_hy:.2f}%", f"{latest_hy - hy_week_ago:+.2f} pts (1w)", delta_color="inverse",
+              help=f"Extra yield on junk bonds over Treasuries. Higher = more credit stress. Lower than {higher_pct:.0f}% of readings since {s_hy.index[0].year}." + spark_help)
+    mini_chart(s_hy, "mean", C_RRP, "%{y:.2f}%", "mini_hy")
+with m4.container(border=True):
+    if rates is not None and rates['DGS10'].notna().sum() > 5:
+        y10 = rates['DGS10'].dropna()
+        st.metric("10-Year Treasury", f"{y10.iloc[-1]:.2f}%", f"{y10.iloc[-1] - y10.iloc[-6]:+.2f} pts (1w)", delta_color="off",
+                  help="What the US government pays to borrow for 10 years. Sets mortgage and long-term borrowing costs; a key input for stock valuations. See the Rates tab." + spark_help)
+        mini_chart(y10, "mean", "#f0f0f0", "%{y:.2f}%", "mini_10y")
+    else:
+        st.metric("10-Year Treasury", "—", help="Treasury yields could not be loaded.")
+with m5.container(border=True):
+    if 'SPY' in df.columns and df['SPY'].dropna().shape[0] > 1:
+        spy = df['SPY'].dropna()
+        st.metric("S&P 500 (SPY)", f"${spy.iloc[-1]:,.2f}", f"{(spy.iloc[-1] / spy.iloc[-2] - 1) * 100:+.1f}% WoW",
+                  help="Month-end prices." + spark_help)
+        mini_chart(spy, "last", C_SPY, "$%{y:,.2f}", "mini_spy", area=True)
 
 st.write("")
 
@@ -398,9 +451,10 @@ with tab_over:
     st.subheader("Net Liquidity vs S&P 500")
     fig1 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
                          row_heights=[0.72, 0.28], specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
-    fig1.add_trace(go.Scatter(x=df.index, y=df['Net Liquidity (T)'], name="Net Liquidity (T$)", line=dict(color=C_NET, width=2)), row=1, col=1, secondary_y=False)
-    fig1.add_trace(go.Scatter(x=df.index, y=df['SPY'], name="SPY", line=dict(color=C_SPY, width=1.5)), row=1, col=1, secondary_y=True)
-    fig1.add_trace(go.Scatter(x=df.index, y=df['DFF'].ffill(), name="Fed Funds (%)", line=dict(color=C_RATE, width=1.5)), row=2, col=1)
+    df_c = pd.concat([to_freq(df[['Net Liquidity (T)', 'SPY']], "last"), to_freq(df['DFF'], "mean")], axis=1)
+    fig1.add_trace(go.Scatter(x=df_c.index, y=df_c['Net Liquidity (T)'], name="Net Liquidity (T$)", line=dict(color=C_NET, width=2)), row=1, col=1, secondary_y=False)
+    fig1.add_trace(go.Scatter(x=df_c.index, y=df_c['SPY'], name="SPY", line=dict(color=C_SPY, width=1.5)), row=1, col=1, secondary_y=True)
+    fig1.add_trace(go.Scatter(x=df_c.index, y=df_c['DFF'].ffill(), name="Fed Funds (%)", line=dict(color=C_RATE, width=1.5)), row=2, col=1)
 
     show_events = st.toggle("Show policy events", value=True)
     if show_events:
@@ -434,6 +488,7 @@ with tab_over:
         st.caption("Bands: below 4% calm · 4–6% caution · above 6% stress.")
     with cs2:
         hy_view = s_hy[s_hy.index >= start_date] if (s_hy.index >= start_date).sum() > 10 else s_hy
+        hy_view = to_freq(hy_view, "mean")
         fig_hy = go.Figure(go.Scatter(x=hy_view.index, y=hy_view, name="HY spread", line=dict(color="#e8e8e8", width=1.5)))
         fig_hy.add_hrect(y0=0, y1=4, fillcolor=C_FED, opacity=0.08, line_width=0)
         fig_hy.add_hrect(y0=4, y1=6, fillcolor=C_RRP, opacity=0.08, line_width=0)
@@ -508,9 +563,10 @@ with tab_liq:
                       delta_color="normal" if field == 'WALCL' else "inverse", help=meaning.capitalize() + ".")
             r_, g_, b_ = (int(color[i:i + 2], 16) for i in (1, 3, 5))
             fill = f"rgba({r_},{g_},{b_},0.2)"  # same color, 20% opacity
-            fig_l = go.Figure(go.Scatter(x=series.index, y=series / 1000, mode="lines", fill="tozeroy",
+            plot_s = to_freq(series, "last")
+            fig_l = go.Figure(go.Scatter(x=plot_s.index, y=plot_s / 1000, mode="lines", fill="tozeroy",
                                          line=dict(color=color, width=2), fillcolor=fill,
-                                         hovertemplate="%{x|%b %d, %Y}: $%{y:.2f}T<extra></extra>"))
+                                         hovertemplate="%{x|" + HOVER_DATE + "}: $%{y:.2f}T<extra></extra>"))
             style_fig(fig_l, 220)
             fig_l.update_layout(showlegend=False, hovermode="closest", margin=dict(l=10, r=10, t=10, b=10))
             fig_l.update_yaxes(title_text="$T", rangemode="tozero")
@@ -519,11 +575,12 @@ with tab_liq:
             st.caption(meaning.capitalize())
 
     with st.expander("Classic stacked view (the bathtub)"):
+        df_l = to_freq(df[['Net Liquidity (T)', 'WTREGEN', 'RRPONTSYD', 'WALCL']], "last")
         fig_levels = go.Figure()
-        fig_levels.add_trace(go.Scatter(x=df.index, y=df['Net Liquidity (T)'], name="Net Liquidity", stackgroup='one', line=dict(color=C_NET)))
-        fig_levels.add_trace(go.Scatter(x=df.index, y=df['WTREGEN']/1000, name="TGA Drain", stackgroup='one', line=dict(color=C_TGA)))
-        fig_levels.add_trace(go.Scatter(x=df.index, y=df['RRPONTSYD']/1000, name="RRP Drain", stackgroup='one', line=dict(color=C_RRP)))
-        fig_levels.add_trace(go.Scatter(x=df.index, y=df['WALCL']/1000, name="Fed Assets (WALCL)", line=dict(color='#98FB98', width=3, dash='dot')))
+        fig_levels.add_trace(go.Scatter(x=df_l.index, y=df_l['Net Liquidity (T)'], name="Net Liquidity", stackgroup='one', line=dict(color=C_NET)))
+        fig_levels.add_trace(go.Scatter(x=df_l.index, y=df_l['WTREGEN']/1000, name="TGA Drain", stackgroup='one', line=dict(color=C_TGA)))
+        fig_levels.add_trace(go.Scatter(x=df_l.index, y=df_l['RRPONTSYD']/1000, name="RRP Drain", stackgroup='one', line=dict(color=C_RRP)))
+        fig_levels.add_trace(go.Scatter(x=df_l.index, y=df_l['WALCL']/1000, name="Fed Assets (WALCL)", line=dict(color='#98FB98', width=3, dash='dot')))
         style_fig(fig_levels, 420)
         fig_levels.update_layout(yaxis_title="Trillions ($)")
         apply_time_gridlines(fig_levels)
@@ -620,13 +677,15 @@ with tab_rates:
         st.markdown("#### Yields over time")
         show_real = st.toggle("Add the 10-year real yield (after expected inflation)", value=False,
                               help="Often the best single rate for explaining gold and Bitcoin, which pay no interest.")
-        hist = r[r.index >= start_date]
+        hist = r[r.index >= start_date]          # daily, used to date inversions precisely
+        hist_c = to_freq(hist, "mean")             # what the charts plot
         fig_y = go.Figure()
         for code, color in (('DGS3MO', '#4fc3f7'), ('DGS2', C_RRP), ('DGS10', '#f0f0f0')):
-            fig_y.add_trace(go.Scatter(x=hist.index, y=hist[code], name=RATE_SERIES[code], line=dict(color=color, width=1.8)))
-        fig_y.add_trace(go.Scatter(x=df.index, y=df['DFF'].ffill(), name="Fed funds", line=dict(color=C_RATE, width=1.5, dash="dot")))
+            fig_y.add_trace(go.Scatter(x=hist_c.index, y=hist_c[code], name=RATE_SERIES[code], line=dict(color=color, width=1.8)))
+        dff_c = to_freq(df['DFF'], "mean")
+        fig_y.add_trace(go.Scatter(x=dff_c.index, y=dff_c, name="Fed funds", line=dict(color=C_RATE, width=1.5, dash="dot")))
         if show_real:
-            fig_y.add_trace(go.Scatter(x=hist.index, y=hist['DFII10'], name="10Y real", line=dict(color="#d4af37", width=1.8)))
+            fig_y.add_trace(go.Scatter(x=hist_c.index, y=hist_c['DFII10'], name="10Y real", line=dict(color="#d4af37", width=1.8)))
         style_fig(fig_y, 420)
         fig_y.update_layout(yaxis_title="Yield (%)")
         apply_time_gridlines(fig_y)
@@ -634,18 +693,62 @@ with tab_rates:
 
         # --- 3. Spreads with the inverted zone shaded ---
         st.markdown("#### Is the curve inverted?")
+
+        def inversion_episodes(spread, merge_gap_days=30, min_days=10):
+            """Periods when the spread was below zero (daily data). Short gaps are merged, blips dropped."""
+            spread = spread.dropna()
+            neg = spread < 0
+            runs = (neg != neg.shift()).cumsum()
+            eps = []
+            for _, grp in spread[neg].groupby(runs[neg]):
+                if eps and (grp.index[0] - eps[-1][1]).days <= merge_gap_days:
+                    eps[-1][1] = grp.index[-1]
+                else:
+                    eps.append([grp.index[0], grp.index[-1]])
+            out = []
+            for a_, b_ in eps:
+                if (b_ - a_).days < min_days:
+                    continue
+                out.append({"start": a_, "end": b_, "deepest": spread[a_:b_].min(),
+                            "ongoing": b_ == spread.index[-1]})
+            return out
+
+        eps_3m = inversion_episodes(hist['T10Y3M'])
+        eps_2y = inversion_episodes(hist['T10Y2Y'])
+
         fig_s = go.Figure()
-        low = min(hist['T10Y3M'].min(), hist['T10Y2Y'].min(), -0.5)
-        fig_s.add_hrect(y0=low * 1.1, y1=0, fillcolor=C_TGA, opacity=0.12, line_width=0)
-        fig_s.add_annotation(x=0.01, y=low * 0.55, xref="paper", text="Inverted zone", showarrow=False,
-                             xanchor="left", font=dict(color=C_TGA, size=12))
-        fig_s.add_trace(go.Scatter(x=hist.index, y=hist['T10Y3M'], name="10Y − 3M", line=dict(color=C_NET, width=2)))
-        fig_s.add_trace(go.Scatter(x=hist.index, y=hist['T10Y2Y'], name="10Y − 2Y", line=dict(color=C_RRP, width=1.6)))
+        low = min(hist_c['T10Y3M'].min(), hist_c['T10Y2Y'].min(), -0.5)
+        fig_s.add_hrect(y0=low * 1.1, y1=0, fillcolor=C_TGA, opacity=0.06, line_width=0)
+        for ep in eps_3m:
+            fig_s.add_vrect(x0=ep["start"], x1=ep["end"], fillcolor=C_TGA, opacity=0.22, line_width=0)
+            y0_, y1_ = ep["start"].year, ep["end"].year
+            label = "now" if ep["ongoing"] else (str(y0_) if y0_ == y1_ else f"{y0_}–{str(y1_)[2:]}")
+            fig_s.add_annotation(x=ep["start"] + (ep["end"] - ep["start"]) / 2, y=1.0, yref="paper", yanchor="bottom",
+                                 text=label, showarrow=False, font=dict(color=C_TGA, size=11))
+        fig_s.add_trace(go.Scatter(x=hist_c.index, y=hist_c['T10Y3M'], name="10Y − 3M", line=dict(color=C_NET, width=2)))
+        fig_s.add_trace(go.Scatter(x=hist_c.index, y=hist_c['T10Y2Y'], name="10Y − 2Y", line=dict(color=C_RRP, width=1.6)))
         fig_s.add_hline(y=0, line_width=1, line_color="rgba(200,200,200,0.6)")
-        style_fig(fig_s, 360)
-        fig_s.update_layout(yaxis_title="Spread (percentage points)")
+        style_fig(fig_s, 400)
+        fig_s.update_layout(yaxis_title="Spread (percentage points)", margin=dict(l=10, r=10, t=40, b=10),
+                            legend=dict(orientation="h", yanchor="top", y=-0.08, x=0))
         apply_time_gridlines(fig_s)
         st.plotly_chart(fig_s, width='stretch', key="spreads_history", config={"displayModeBar": False})
+        st.caption("Red bands = periods when the 10Y − 3M spread was inverted (below zero), labelled by year; exact dates in the table below. Dated from daily data. "
+                   "Blips shorter than 10 days are ignored and gaps under a month are merged.")
+
+        rows_inv = []
+        for name_, eps in (("10Y − 3M", eps_3m), ("10Y − 2Y", eps_2y)):
+            for ep in eps:
+                months = (ep["end"] - ep["start"]).days / 30.4
+                rows_inv.append({"Spread": name_, "Started": f"{ep['start']:%b %d, %Y}",
+                                 "Ended": "still inverted" if ep["ongoing"] else f"{ep['end']:%b %d, %Y}",
+                                 "Length": (f"{months:.0f} month" + ("s" if round(months) != 1 else "")) if months >= 1 else f"{(ep['end'] - ep['start']).days} days",
+                                 "Deepest": f"{ep['deepest']:+.2f} pts"})
+        if rows_inv:
+            st.markdown("**Inversions in the selected date range**")
+            st.dataframe(pd.DataFrame(rows_inv), hide_index=True, width='stretch')
+        else:
+            st.caption("No inversions in the selected date range.")
 
         with st.expander("How to read this"):
             st.write("A Treasury yield is the interest rate the US government pays to borrow for that length of time. "
@@ -670,12 +773,13 @@ with tab_assets:
     if not picked:
         st.info("Pick at least one asset.")
     else:
-        first_valid_prices = df[available].apply(lambda x: x.loc[x.first_valid_index()])
-        df_race = (df[available] / first_valid_prices) * 100
+        prices_c = to_freq(df[available], "last")
+        first_valid_prices = prices_c.apply(lambda x: x.loc[x.first_valid_index()])
+        df_race = (prices_c / first_valid_prices) * 100
         asset_colors = {'SPY': C_SPY, 'QQQ': '#4fc3f7', 'BTC': '#f7931a', 'GLD': '#d4af37'}
         fig3 = go.Figure()
         for a in picked:
-            fig3.add_trace(go.Scatter(x=df.index, y=df_race[a], name=a, line=dict(color=asset_colors[a], width=2)))
+            fig3.add_trace(go.Scatter(x=df_race.index, y=df_race[a], name=a, line=dict(color=asset_colors[a], width=2)))
         style_fig(fig3, 520)
         fig3.update_layout(yaxis_type="log" if use_log else "linear", yaxis_title="Index (start = 100)")
         apply_time_gridlines(fig3)
